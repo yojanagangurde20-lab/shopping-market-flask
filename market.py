@@ -2,9 +2,10 @@ import os
 
 from flask import Flask, render_template, redirect, render_template_string, url_for, request, session
 from models import db, User, Product, Order
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey123"
+app.secret_key = os.getenv("SECRET_KEY", "dev_secret_key")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:password@db:5432/market_db"
@@ -29,64 +30,100 @@ items = [
 
 ]
 
-cart = [] #shopping cart to hold added items
-
 # Home page
 @app.route("/")
 @app.route("/home")
 def home_page():
     featured_items = [items[1], items[2], items[4]]
-    return render_template('home.html', items=featured_items, cart_count=len(cart))
+    return render_template('home.html', items=featured_items, cart_count=len(session.get("cart", [])))
 
 # Shop page
 @app.route("/shop")
 def shop_page():
-    return render_template('shop.html', items=items, cart_count=len(cart))
+    return render_template('shop.html', items=items, cart_count=len(session.get("cart", [])))
 
 # Add to cart / Buy Now
 @app.route("/buy_now/<int:item_id>", methods=["POST"])
 def buy_now(item_id):
+
+    cart = session.get("cart", [])
     product = next((item for item in items if item['id'] == item_id), None)
     if product:
         cart.append(product)
+    session["cart"] = cart
     return redirect(url_for('cart_page'))
 
 #cart page
 @app.route("/cart")
 def cart_page():
+
+    cart = session.get("cart", [])
     total = sum(int(item['price'].strip('$')) for item in cart)
     return render_template("cart.html", cart=cart, cart_count=len(cart), total=total)
 
 #checkout page
-@app.route("/checkout", methods=["GET", "POST"])
+@app.route("/checkout")
 def checkout_page():
+
+    cart = session.get("cart", [])
+
     if not cart:
         return redirect(url_for('shop_page'))
 
     total = sum(int(item['price'].strip('$')) for item in cart)
 
-    if request.method == "POST":
+    return render_template(
+        "checkout.html",
+        cart=cart,
+        total=total,
+        cart_count=len(cart)
+    )
 
-        name = request.form.get("name")
-        address = request.form.get("address")
-        payment = request.form.get("payment")
+# place order page
+@app.route("/place_order", methods=["POST"])
+def place_order():
+    cart = session.get("cart", [])
+    if not cart:
+        return redirect(url_for('shop_page'))
 
-        new_order = Order(user_name=name, address=address, total=total)
-        db.session.add(new_order)
-        db.session.commit()
-
-        cart.clear()
+    if "user_id" not in session:
+        session["next_page"] = "checkout_page"
 
         return render_template_string("""
-            <div style="text-align:center; margin-top:300px; font-family:sans-serif;">
-                <h2>Thank You, {{ name }}!</h2>
-                <p>Your order has been placed successfully.</p>
-                <p>Shipping to: {{ address }}</p>
-                <a href="{{ url_for('home_page') }}">Go to Home</a>
-            </div>
-        """, name=name, address=address)
+        <div style="text-align:center; margin-top:200px; font-family:sans-serif;">
+            <h2>You Must Log In First!</h2>
+            <p>Please <a href="{{ url_for('login_page', next='checkout') }}">log in</a> to place your order.</p>
+            <p>Don't have an account? <a href="{{ url_for('register_page') }}">Register here</a></p>
+            <a href="{{ url_for('shop_page') }}">Go back to Shop</a>
+        </div>
+        """)
 
-    return render_template("checkout.html", cart=cart, total=total, cart_count=len(cart))
+    name = request.form.get("name")
+    address = request.form.get("address")
+    payment = request.form.get("payment")
+
+    total = sum(int(item['price'].strip('$')) for item in cart)
+
+    new_order = Order(
+        user_name=name,
+        address=address,
+        total=total,
+        user_id=session.get("user_id")
+    )
+
+    db.session.add(new_order)
+    db.session.commit()
+
+    session["cart"] = []
+
+    return render_template_string("""
+    <div style="text-align:center; margin-top:300px; font-family:sans-serif;">
+        <h2>Thank You, {{ name }}!</h2>
+        <p>Your order has been placed successfully.</p>
+        <p>Shipping to: {{ address }}</p>
+        <a href="{{ url_for('home_page') }}">Go to Home</a>
+    </div>
+    """, name=name, address=address)
 
 # Login page
 @app.route("/login", methods=["GET", "POST"])
@@ -98,29 +135,35 @@ def login_page():
         password = request.form.get("password")
         name = email.split("@")[0]
 
-        user = User.query.filter_by(email=email,password=password).first()
+        user = User.query.filter_by(email=email).first()
 
-        if user:
+        if user and check_password_hash(user.password, password):
             session['user_name'] = user.name
+            session['user_id'] = user.id
+
+            next_page = session.pop("next_page", None)
+
+            redirect_url = url_for(next_page) if next_page else url_for('home_page')
 
             return render_template_string("""
             <div style="text-align:center; margin-top:300px; font-family:sans-serif;">
                 <h2>Welcome Back, {{ name }}!</h2>
                 <p>You have successfully logged in.</p>
-                <p>Keep shopping!</p>
+                <a href="{{ redirect_url }}">Continue to place order</a><br>
                 <a href="{{ url_for('home_page') }}">Go to Home</a>
             </div>
-        """ , name=name, email=email)
+            """, name=name, redirect_url=redirect_url)
 
         else:
             return render_template_string("""
             <div style="text-align:center; margin-top:300px; font-family:sans-serif;">
                 <h2>Invalid Login!</h2>
-                <p>No account exists with email:{{ email }}</p>
+                <p>No account exists with email: {{ email }}</p>
                 <p>Please <a href="{{ url_for('register_page') }}">register</a> first.</p>
                 <a href="{{ url_for('login_page') }}">Try Different Credentials</a>
             </div>
-        """ , name=name, email=email)
+            """, email=email)
+
 
     return render_template("login.html")
 
@@ -145,13 +188,15 @@ def register_page():
                 </div>
             """)
 
-        new_user = User(name=name, email=email, password=password)
+        hashed_password = generate_password_hash(password)
+        new_user = User(name=name, email=email, password=hashed_password)
 
 
         db.session.add(new_user)
         db.session.commit()
 
         session['user_name'] = name
+        session['user_id'] = new_user.id
 
         return render_template_string("""
             <div style="text-align:center; margin-top:300px; font-family:sans-serif;">
@@ -166,7 +211,7 @@ def register_page():
 
 @app.route("/logout")
 def logout():
-    session.pop('user_name', None)
+    session.clear()
     return redirect(url_for('home_page'))
 
 if __name__ == "__main__":

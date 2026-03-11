@@ -9,7 +9,7 @@ class User(db.Model):
     email = db.Column(db.String(100), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
 
-orders = db.relationship("Order", backref="user", lazy=True)
+    orders = db.relationship("Order", backref="user", lazy=True)
 
 class Product(db.Model):
     __tablename__ = "products"
